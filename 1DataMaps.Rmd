@@ -1,0 +1,376 @@
+---
+title: "Social Sensning data mining for the Trossachs-Ben Lomond National Park - Step1"
+output: html_notebook
+---
+
+Step1 - clean the data and produce fact maps
+  
+  This script is intended to implement the big data mining for the Loch National Park in Scotland.
+  The total records are 390398 tweets from 2018-01-01 to 2019-01-01.
+  
+  author: Bowei Chen @ 2020
+  contact: chenbw@aircas.ac.cn
+
+```{r}
+
+# include some libraries
+  library(data.table)
+  library(dplyr)
+  library(raster)
+  library(maps)
+  library(ggplot2)
+  library(ggsci)
+  library(lubridate)
+  library(viridis)
+  library(geosphere)
+  library(rgdal)
+  library(tidyverse)
+  library(sf)
+  library(ggmap)
+  library(ggrepel)
+  library(ggTimeSeries)
+  library(ggridges)
+# install.packages('bit64')
+
+```
+
+This part is used to configure the local proxy using the ssr approch
+
+```{r}
+
+# 1st - open ssr and enable local proxy
+
+# 2nd - get your API Key from google cloud, test if is working using the following link:
+# https://maps.googleapis.com/maps/api/staticmap?center=40.714%2c%20-73.998&zoom=12&size=400x400&key=AIzaSyD41bZSw88ab5ZIu1zjcvAW0Se00H4xDW4
+
+# 3rd - edit the configuration file in RStudio
+# set_config(
+#   use_proxy(url="your.proxy.ip", port="port", username="user",password="password")
+# )
+
+library(httr)
+
+set_config(
+  use_proxy(url="127.0.0.1", port=1087)
+)
+
+# testing using this:
+httr::GET("www.google.com")
+
+# # this sets your google map for this session
+# register_google(key = "AIzaSyD41bZSw88ab5ZIu1zjcvAW0Se00H4xDW4")
+# 
+# # this sets your google map permanently
+# register_google(key = "AIzaSyD41bZSw88ab5ZIu1zjcvAW0Se00H4xDW4", write = TRUE)
+
+# you can check the key using the following command
+# file.edit('~/.Renviron')
+
+```
+
+First we read in all records
+
+The first column is tweet id which uniquely identifying a tweet and the second column is user id which is the id of a twitter user(handle). The place tag indicates the type of the location. LatLon means a tweet is geolocated with exact locations and Place indicates a tweet's location is only provided in the place level such as a city.
+
+
+```{r}
+
+# read all records and give names to the coloums
+  df <- fread("data/Trossachs-Ben Lomond Park Tweets.csv", header = T)
+  nrow(df)
+
+# Remove duplicate rows of the dataframe
+  df <- distinct(df)
+  
+# assign correct attribuates to the data frame
+  names(df) <- c("tid", "uid", "text", "otime", "lats", "lons", "ptage")
+
+
+```
+
+Then we read in the shapefile boundary
+
+```{r}
+
+  summary(df)
+
+  # no. of records
+  nrow(df)
+  
+# get the admin boundary of thailand
+  thailand <- readOGR("data/national park boundary.shp", layer = "national park boundary")
+  thailand <- spTransform(thailand, CRS("+proj=longlat +datum=WGS84 +no_defs"))
+
+  plot(thailand)
+
+```
+
+Next subset the exact boundary within the given shapefile
+
+```{r}
+
+  # subset data
+  dfs <- df
+  coordinates(dfs) <- ~lons+lats
+  proj4string(dfs) <- proj4string(thailand)
+  
+  
+  polys.sub <- dfs[!is.na(sp::over(dfs, sp::geometry(thailand))), ] 
+  dft <- as.data.frame(polys.sub)
+  df <- dft
+  
+  # no. of records left
+  nrow(df)
+  
+  # deal with the time zone problem  
+  df$otime <- as.POSIXct(df$otime, "EST")
+  tz <- as.POSIXct(df$otime, tz="Europe/London")
+  tz <- format(tz, tz="Europe/London", usetz=TRUE)
+  df$time <-tz
+  df$time <- as.POSIXct(df$time, "Europe/London")
+  
+  # check if good to go
+  df[c("otime", "time")]
+  
+```
+
+Now let's have a look at the whole picture
+plot all 12 months for 17568 records from 2018-01-01 to 2019-01-01
+
+```{r}
+
+  clons <- (thailand@bbox[1]+thailand@bbox[3])*0.5
+  clats <- (thailand@bbox[2]+thailand@bbox[4])*0.5
+
+  cbox <- thailand@bbox
+  cbox[1,1] <- cbox[1,1]-0.1
+  cbox[2,1] <- cbox[2,1]-0.1
+  cbox[1,2] <- cbox[1,2]+0.1
+  cbox[2,2] <- cbox[2,2]+0.1
+  # p <- ggmap(get_googlemap(center = c(lon = clons, lat = clats),
+  #                     zoom = 9, 
+  #                     maptype ='hybrid',
+  #                     color = 'color'))+
+p <- get_stamenmap(cbox, zoom = 12, maptype = "terrain") %>% ggmap() +
+    geom_polygon(data = thailand, aes(x = long, y = lat, group = group), color = 'black', alpha=0.5) +
+    geom_point(data=df, aes(x=lons, y=lats), pch=16, fill = "yellow", color = 'yellow', alpha=0.2)+
+    theme(legend.position="none",
+          plot.title = element_text(hjust = 0.5, face = "bold")) +
+    # ggtitle(paste0("The geolocated tweets of the Trossachs-Ben Lomond National Park in the year 2018 \n")) +
+    labs(x = 'Longitude', y = 'Latitude')
+  
+  # print(p)
+
+  ggsave("figs/whole_pic.png", plot = p, dpi = 300, width = 6, height = 6)
+
+```
+
+Finally we can calculate some interesting facts
+
+```{r}
+
+# assign time labels
+  df$month <- month(df$time)
+  df$week <- week(df$time)
+  df$day <- day(df$time)
+  df$hour <- hour(df$time)
+  
+# divide into different time bins  
+  df$hour_bin <- df$hour %>% .bincode(seq(-1,23,1))
+  df$hour_bin <- sapply(df$hour,function(bin) {
+    return(paste0((bin)*1,"-", (bin+1)*1))
+  })
+  df$hour_bin <- as.factor(df$hour_bin)
+  
+# also AM and PM
+  df$ampm <- ifelse(df$hour<=11, "AM", "PM")
+
+# check if it is good  
+  summary(df)
+  str(df)
+  head(df)
+ 
+```
+
+# overall calendar plot
+
+```{r}
+
+# Generate frequency table
+  df.cal <- df$time %>% as_date() %>% table %>% data.frame
+  names(df.cal) <- c("Date","Tweets")
+  df.cal$Date  <- as.Date(df.cal$Date)
+  df.cal <- filter(df.cal, Date <= "2018-12-31")
+
+  ggplot_calendar_heatmap(
+    df.cal,
+    'Date',
+    'Tweets'
+  ) + theme_minimal() + 
+    theme(legend.position = "right",
+          legend.direction = "vertical") + 
+    scale_fill_viridis_c()
+
+ggsave(filename = "figs/tweets-calendar.png", bg="transparent", width = 7, height = 2, dpi = 300, units = "in")
+ 
+
+```
+
+# show the changes of different months in the year 2018
+
+```{r}
+
+# the total number of geolocated tweets for different months
+  months <- group_by(df, month)
+  dif.months <- summarise(months, count = n())
+  names(dif.months)
+  
+  ggplot(data = dif.months, aes(x = as.factor(month), y = count, fill = count)) +   
+    theme_bw() +
+    theme(legend.position = "none")+
+    theme(plot.title = element_text(hjust = 0.5, face = "bold")) +
+    labs(y = "The total number of geolocated tweets",
+        # title = "\n The total number of geolocated tweets for different months in the year 2018 \n", 
+         x = "Month in the year 2018",
+         fill = "") +
+    geom_bar(stat = "identity", alpha = 0.9, width = 0.7, color = "grey")+
+    geom_point(size = 1.5, color = "black") +
+    scale_fill_material("teal")
+  
+  # ggsave('figs/trend_months.png', width = 10, height = 6)
+  ggsave('figs/trend_months.png', width = 6, height = 4)
+
+  
+```
+
+# check day trends
+
+```{r}
+
+# the total number of geolocated tweets for different days
+  days <- group_by(df, day)
+  dif.days <- summarise(days, count = n())
+  names(dif.days)
+  
+  ggplot(data = dif.days, aes(x = as.factor(day), y = count, fill = count)) +   
+    theme_bw() +
+    theme(legend.position = "none")+
+    theme(plot.title = element_text(hjust = 0.5, face = "bold")) +
+    labs(x = "Days in every month in the year 2018",
+      # title = "\n The number of geolocated tweets for days in a month in 2018 \n", 
+         y = "The total number of geolocated tweets",
+         fill = "") +
+    geom_bar(stat = "identity", alpha = 0.9, width = 0.7, color = "grey")+
+    geom_point(size = 1.5, color = "black") +
+    coord_flip()+
+    scale_fill_material("blue-grey")
+  
+  ggsave('figs/trend_days.png', width = 4, height = 6)
+  # ggsave('figs/trend_days.png', width = 6, height = 10)
+
+  
+# first let's see how people react in a day 
+  ggplot(df, aes(x = day)) +
+    theme_linedraw() +
+    theme(panel.grid.minor = element_blank(),
+          panel.grid.major.y = element_blank(),
+          plot.title = element_text(hjust = 0.5, face = "bold")) +
+    # geom_histogram(bins = 31, fill = 'black', color = 'white', alpha = .7) +
+    geom_histogram(bins = 31, fill = 'black', color = 'white', alpha = .7, aes(y=..density..)) +
+    geom_density(alpha = 0.5, color = NA, fill = "gray") +
+    labs(fill = "", title = " ") +     
+    # labs(fill = "", title = "The distribuation of geolocated tweets for different days of a month for the year 2018 \n") +                   
+    facet_wrap(~ month, ncol = 3)
+
+  ggsave('figs/day_in_month.png', width = 6, height = 4)
+  # ggsave('figs/day_in_month.png', width = 10, height = 6)
+
+```
+
+# check hour trends
+
+```{r}
+
+# the total number of geolocated tweets for different hour in a day
+  hours <- group_by(df, hour)
+  dif.hours <- summarise(hours, count = n())
+  names(dif.hours)
+  
+  ggplot(data = dif.hours, aes(x = as.factor(hour), y = count, fill = count)) +   
+    theme_bw() +
+    theme(legend.position = "none")+
+    theme(plot.title = element_text(hjust = 0.5, face = "bold")) +
+    labs(x = "Hours in a day",
+         # title = "\n The number of geolocated tweets for different hours in a day \n", 
+         y = "The total number of geolocated tweets",
+         fill = "") +
+    geom_bar(stat = "identity", alpha = 0.9, width = 0.7, color = "grey")+
+    geom_point(size = 1.5, color = "black") +
+    coord_flip()+
+    scale_fill_material("light-blue")
+  
+  # ggsave('figs/trend_hours.png', width = 6, height = 10)
+  ggsave('figs/trend_hours.png', width = 4, height = 6)
+
+  
+# first let's see how people react in a day 
+  ggplot(df, aes(x = hour)) +
+    theme_linedraw() +
+    theme(panel.grid.minor = element_blank(),
+          panel.grid.major.y = element_blank(),
+          plot.title = element_text(hjust = 0.5, face = "bold")) +
+    # geom_histogram(bins = 30, fill = 'black', color = 'white', alpha = .7) +
+    geom_histogram(bins = 24, fill = 'black', color = 'white', alpha = .7, aes(y=..density..)) +
+    geom_density(alpha = 0.5, color = NA, fill = "skyblue") +
+    # labs(fill = "", title = "The distribuation of geolocated tweets for different hours of a day for 12 months in 2018 \n") +
+    labs(fill = "", title = " ") +
+    facet_wrap(~ month, ncol = 3)
+  
+  ggsave('figs/hours_in_day.png', width = 6, height = 4)
+
+  # ggsave('figs/hours_in_day.png', width = 10, height = 6)
+
+```
+
+Let's check how many tweets they sent
+
+```{r}
+
+users <- group_by(df, uid)
+
+dif.users <- summarise(users, count = n())
+summary(dif.users)
+dif.users <- arrange(dif.users, desc(count))
+mean(dif.users$count)
+dif.users <- dif.users[1:20,]
+dif.users$uid <- as.factor(dif.users$uid)
+
+
+write.csv(dif.users, "output/top_user.csv")
+
+# Create a rank variable based on importance
+  rankImportance <- dif.users %>%
+    mutate(Rank = paste0('#',dense_rank(desc(count))))
+  
+# Use ggplot2 to visualize the relative importance of variables
+  ggplot(rankImportance, aes(x = reorder(uid, count), 
+                             y = count, fill = count)) +
+  theme_minimal() + 
+  theme(legend.position = "none",
+        panel.grid.minor = element_blank(),
+        # panel.grid.major.y = element_blank(),
+        panel.border = element_blank())+
+    theme(plot.title = element_text(hjust = 0.5, face = "bold")) +
+  labs(title = "\n The total number of geolocated tweets sent in the year 2018 for unique user\n", 
+       x = "",
+       y = "\n The total number of geolocated tweets sent in the year 2018", 
+       fill = "") +
+  geom_bar(stat='identity', width = 0.9) + 
+  geom_text(aes(x = uid, y = 0.3, label = Rank),
+              hjust=0, vjust=0.55, size = 3, colour = 'black') +
+  scale_fill_continuous(high = "#cc0033", low = "dark grey") +
+  coord_flip()
+
+ggsave('figs/trend_user.png', width = 10, height = 6)
+
+```
